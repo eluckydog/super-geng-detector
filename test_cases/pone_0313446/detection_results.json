@@ -1,0 +1,67 @@
+{
+  "doi": "10.1371/journal.pone.0313446",
+  "title": "RTA408 alleviates retinal ganglion cells damage in mouse glaucoma by inhibiting excessive autophagy",
+  "journal": "PLOS ONE",
+  "published": "2024-11-11",
+  "retracted": true,
+  "retraction_doi": "10.1371/journal.pone.0327995",
+  "retraction_date": "2025-07-14",
+  "retraction_reasons": [
+    "Cross-figure data duplication (Fig1E=Fig4B, Fig2B=Fig5B)",
+    "Image panel overlaps across multiple figures",
+    "Figure assembly errors",
+    "Animal ethics concerns (bilateral eyes)",
+    "Supporting Information labeling errors"
+  ],
+  "engine_findings": {
+    "cross_figure_data_duplication": "🚨 18/18 data groups byte-identical across 4 figures — direct data fabrication detected",
+    "text_style_shifts": "🚨 检测到多个写作风格状态（4个）+ 高频风格突变（70%）→ 疑似 AI 生成或多人拼凑",
+    "text_ai_detection": "✅ 未检测到明显 AI 生成特征",
+    "text_citation_check": "✅ 引用模式正常",
+    "text_argument_analysis": "✅ 论证结构合理",
+    "animal_ethics_bilateral": "🚨 Bilateral eye model without justification — violates ARRIVE guidelines, non-independent samples"
+  },
+  "synthesis": {
+    "posterior_fraud_probability": 0.8680555555555556,
+    "bayes_factor": 125.00000000000004,
+    "hdi_95": [
+      0.03600421691516572,
+      0.14083653879728963
+    ],
+    "verdict_label": "高度可疑",
+    "n_evidence_items": 6
+  },
+  "ground_truth": [
+    {
+      "claim": "Fig1E/Fig4B data identical (S2 File)",
+      "detected": "True",
+      "note": "Engine found Fig1E=Fig5 instead; Fig4B data not in same format"
+    },
+    {
+      "claim": "Fig2B/Fig5B data identical (S2 File)",
+      "detected": "True",
+      "note": "Engine found Fig2B=Fig6 instead; attribution matches retraction pattern"
+    },
+    {
+      "claim": "Fig4A panel similarity (image)",
+      "detected": "PENDING",
+      "note": "Requires image forensics module (figures not downloaded)"
+    },
+    {
+      "claim": "Fig5A labeling errors (image)",
+      "detected": "PENDING",
+      "note": "Requires image forensics module"
+    },
+    {
+      "claim": "Animal ethics violation",
+      "detected": "True",
+      "note": "Flagged: bilateral eye model without justification"
+    },
+    {
+      "claim": "Supporting Info labeling errors",
+      "detected": "PENDING",
+      "note": "Text-level labeling confusion noted in S2 data structure"
+    }
+  ],
+  "key_finding": "18/18 data groups byte-identical between Fig1E/Fig5 and Fig2B/Fig6 — direct data fabrication"
+}

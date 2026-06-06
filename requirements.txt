@@ -1,0 +1,19 @@
+numpy>=1.20.0
+scipy>=1.7.0
+pillow>=8.0.0
+
+# 贝叶斯推断（推荐）
+numpyro>=0.12.0
+jax>=0.4.0
+
+# 图像法医
+opencv-python-headless>=4.5.0
+
+# 文本法医
+hmmlearn>=0.2.8
+
+# PDF 读取
+PyPDF2>=2.0.0
+
+# 测试用例
+openpyxl>=3.0.0
