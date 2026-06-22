@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>超级耿同学 · 学术论文多维度异常检测</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#0a0e1a;color:#e0e6f0;min-height:100vh}
+.container{max-width:900px;margin:0 auto;padding:40px 20px}
+header{text-align:center;padding:50px 0 30px}
+h1{font-size:2.4em;background:linear-gradient(135deg,#ff6b6b,#c0392b);-webkit-background-clip:text;-webkit-text-fill-color:transparent;margin-bottom:8px}
+.tagline{font-size:1em;color:#8892a8;margin-bottom:6px}
+.badge{display:inline-block;background:#1a1f35;border:1px solid #c0392b;border-radius:20px;padding:5px 14px;font-size:.8em;color:#ff6b6b;margin-top:8px}
+
+.hero-card{background:linear-gradient(135deg,#111627 0%,#1a1025 100%);border:1px solid #2a2040;border-radius:14px;padding:30px;margin:24px 0;text-align:center}
+.hero-card .prob{font-size:3em;font-weight:700;color:#ff6b6b}
+.hero-card .prob-label{color:#8892a8;font-size:.9em;margin-top:4px}
+.hero-card .bf{color:#e0e6f0;font-size:1.1em;margin-top:8px}
+.hero-card .bf span{color:#f7c948;font-weight:700}
+
+.grid-3{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin:20px 0}
+.stat{background:#111627;border:1px solid #1e2540;border-radius:10px;padding:18px;text-align:center}
+.stat .num{font-size:1.6em;font-weight:700;color:#f7c948}
+.stat .label{font-size:.8em;color:#6b7394;margin-top:4px}
+
+.section{margin:32px 0}
+.section h2{font-size:1.2em;color:#f7c948;margin-bottom:16px;border-bottom:1px solid #1e2540;padding-bottom:8px}
+
+.engine-card{background:#111627;border:1px solid #1e2540;border-radius:10px;padding:20px;margin-bottom:12px}
+.engine-card h3{color:#ff6b6b;font-size:1em;margin-bottom:6px}
+.engine-card p{color:#8892a8;font-size:.85em;line-height:1.6}
+.engine-card .dims{display:flex;flex-wrap:wrap;gap:6px;margin-top:10px}
+.engine-card .dim{background:#1a1f35;border:1px solid #2a3050;border-radius:6px;padding:4px 10px;font-size:.75em;color:#a8b2d4}
+
+.evidence{background:#111627;border:1px solid #2a2040;border-radius:10px;padding:20px;margin:12px 0}
+.evidence .e-item{display:flex;align-items:flex-start;padding:8px 0;border-bottom:1px solid #1a1025}
+.evidence .e-item:last-child{border:0}
+.e-status{display:inline-block;width:28px;height:28px;border-radius:50%;text-align:center;line-height:28px;font-size:.8em;margin-right:12px;flex-shrink:0}
+.e-status.yes{background:#1a3a2a;color:#2ecc71;border:1px solid #2ecc71}
+.e-status.warn{background:#3a2a1a;color:#f7c948;border:1px solid #f7c948}
+.e-text{font-size:.88em;color:#c8d0e0}
+.e-text .detail{color:#6b7394;font-size:.8em;margin-top:2px}
+
+.cmd-box{background:#0d1120;border:1px solid #2a3050;border-radius:8px;padding:14px 18px;font-family:'SF Mono','Fira Code',monospace;font-size:.85em;color:#a8b2d4;margin:8px 0;overflow-x:auto}
+
+.cta{display:inline-block;padding:10px 24px;background:linear-gradient(135deg,#c0392b,#e74c3c);border:0;border-radius:8px;color:#fff;text-decoration:none;font-size:.95em;margin:8px 4px;transition:opacity .2s}
+.cta:hover{opacity:.85}
+.cta-gh{display:inline-block;padding:10px 24px;background:#1a1f35;border:1px solid #2a3050;border-radius:8px;color:#e0e6f0;text-decoration:none;font-size:.95em;margin:8px 4px;transition:all .2s}
+.cta-gh:hover{border-color:#f7c948}
+
+footer{text-align:center;padding:40px 0;color:#4a5270;font-size:.85em;border-top:1px solid #1e2540;margin-top:40px}
+
+@media(max-width:600px){.grid-3{grid-template-columns:1fr}h1{font-size:1.6em}}
+</style>
+</head>
+<body>
+<div class="container">
+
+<header>
+<h1>🕵️ 超级耿同学</h1>
+<div class="tagline">多引擎学术论文异常检测框架 · 开源 · MIT</div>
+<div class="badge">后验造假概率 · Bayes 证据网络 · 7+5 维检测</div>
+</header>
+
+<div class="hero-card">
+<h2 style="font-size:1em;color:#8892a8;margin-bottom:12px;font-weight:400;">实测案例 · PLOS ONE 已撤稿论文</h2>
+<div class="prob">86.8%</div>
+<div class="prob-label">后验造假概率</div>
+<div class="bf">Bayes Factor = <span>125</span> · 极强证据</div>
+</div>
+
+<div class="grid-3">
+<div class="stat"><div class="num">7</div><div class="label">理工科检测维度</div></div>
+<div class="stat"><div class="num">5</div><div class="label">文科检测维度</div></div>
+<div class="stat"><div class="num">6</div><div class="label">证据链项目</div></div>
+</div>
+
+<div class="section">
+<h2>🔍 证据链 · 实测输出</h2>
+
+<div class="evidence">
+<div class="e-item">
+<div class="e-status yes">✓</div>
+<div class="e-text">
+<strong>跨图数据重复</strong>
+<div class="detail">18/18 组数据字节一致，跨 4 张图 · 直接数据造假</div>
+</div>
+</div>
+<div class="e-item">
+<div class="e-status yes">✓</div>
+<div class="e-text">
+<strong>动物伦理违规</strong>
+<div class="detail">双侧眼模型未说明合理性 · 违反 ARRIVE 指南</div>
+</div>
+</div>
+<div class="e-item">
+<div class="e-status warn">⚠</div>
+<div class="e-text">
+<strong>AI 生成文本嫌疑</strong>
+<div class="detail">AI 检测模型标记部分段落存在高概率 AI 生成特征</div>
+</div>
+</div>
+<div class="e-item">
+<div class="e-status warn">⚠</div>
+<div class="e-text">
+<strong>文本风格突变</strong>
+<div class="detail">HMM 风格迁移检测发现 70%+ 段落存在风格偏移</div>
+</div>
+</div>
+</div>
+</div>
+
+<div class="section">
+<h2>🏗️ 双引擎架构</h2>
+
+<div class="engine-card">
+<h3>🔬 理工科引擎（7 维）</h3>
+<p>针对数值/图像类论文。检测数据分布异常、粒度冲突、SD 共谋、选择性报告、列差值恒定、图像复用、图像拼接。</p>
+<div class="dims">
+<span class="dim">Benford 全位联合</span>
+<span class="dim">扩展 GRIM 检验</span>
+<span class="dim">SD 贝叶斯一致性</span>
+<span class="dim">p-curve</span>
+<span class="dim">PRNU 传感器指纹</span>
+<span class="dim">JPEG 双重压缩</span>
+<span class="dim">Copy-Move 检测</span>
+</div>
+</div>
+
+<div class="engine-card">
+<h3>📖 文科引擎（5 维）</h3>
+<p>针对文本/论证类论文。检测风格突变、因果谬误、引用虚设、论证空转、AI 生成文本。</p>
+<div class="dims">
+<span class="dim">HMM 文本风格溯源</span>
+<span class="dim">因果图方法论校验</span>
+<span class="dim">引用-正文一致性</span>
+<span class="dim">论证结构分析</span>
+<span class="dim">AI 生成文本识别</span>
+</div>
+</div>
+</div>
+
+<div class="section">
+<h2>🚀 快速使用</h2>
+
+<div class="cmd-box"># 自动分类论文类型并检测<br>python scripts/super_geng.py detect paper.pdf --auto</div>
+<div class="cmd-box"># 数值法医（从 CSV 中检测异常）<br>python scripts/super_geng.py stats data.csv</div>
+<div class="cmd-box"># 图像法医（检测图像复用/拼接）<br>python scripts/super_geng.py image figure.png</div>
+</div>
+
+<div style="text-align:center;margin:30px 0">
+<a class="cta" href="https://github.com/eluckydog/super-geng-detector">查看源码 →</a>
+<a class="cta-gh" href="https://github.com/eluckydog/super-geng-detector/blob/main/SKILL.md">SKILL.md 接口文档</a>
+<a class="cta-gh" href="https://github.com/eluckydog/super-geng-detector/tree/main/test_cases">测试案例</a>
+</div>
+
+<footer>
+<a href="https://github.com/eluckydog/super-geng-detector" style="color:#6b7394;text-decoration:none;">eluckydog/super-geng-detector</a> · MIT License<br>
+⚡ 一个人的实验室 · 学术诚信，开源共治
+</footer>
+</div>
+</body>
+</html>
