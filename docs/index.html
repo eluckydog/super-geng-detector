@@ -83,39 +83,26 @@ footer{text-align:center;padding:30px 0;color:#4a5270;font-size:.82em;border-top
 </div>
 
 <div class="section">
-<h2>真实造假案 &middot; 对比分析 <span class="sub">Nature Electronics &middot; 常凌乾 &middot; 2024</span></h2>
-<div class="compare-row">
-<div class="compare-card">
-<div class="tag fake">造假曲线</div>
-<h4>常凌乾论文 &middot; 力学测试 3 次</h4>
-<svg viewBox="0 0 260 160" width="100%" style="max-width:260px">
-<rect x="0" y="0" width="260" height="160" fill="#111627" rx="6"/>
-<line x1="30" y1="130" x2="240" y2="130" stroke="#3a4570" stroke-width=".6"/>
-<line x1="30" y1="30" x2="30" y2="130" stroke="#3a4570" stroke-width=".6"/>
-<path d="M32,120 Q60,60 90,70 Q120,80 150,55 Q180,50 210,70 Q230,80 238,85" stroke="#ff6b6b" stroke-width="2.5" fill="none"/>
-<path d="M32,119 Q60,59 90,69 Q120,79 150,54 Q180,49 210,69 Q230,79 238,84" stroke="#2ecc71" stroke-width="2.5" fill="none" stroke-dasharray="4,3" opacity="0.7"/>
-<path d="M32,121 Q60,61 90,71 Q120,81 150,56 Q180,51 210,71 Q230,81 238,86" stroke="#3498db" stroke-width="2.5" fill="none" stroke-dasharray="2,4" opacity="0.7"/>
-<text x="70" y="18" fill="#ff6b6b" font-size="8">3 条曲线完全重叠，零误差</text>
-<text x="140" y="150" fill="#6b7394" font-size="6">应变</text>
-<text x="10" y="70" fill="#6b7394" font-size="6">应力</text>
-</svg>
-<p style="font-size:.72em;color:#6b7394;margin-top:6px">三组曲线可通过纯公式从第一组完美推算，误差=0</p>
+<h2>真实造假案 &middot; 原文实锤截图 <span class="sub">Nature Electronics &middot; 常凌乾 &middot; 2024</span></h2>
+
+<div class="case-box" style="text-align:center;padding:16px">
+<h3>论文补充材料原始数据截图</h3>
+<img src="evidence-data-table.jpg" alt="补充材料数据" style="max-width:100%;border-radius:8px;border:1px solid #3a4570;margin:10px 0">
+<p style="font-size:.82em;color:#8892a8;text-align:left">
+<strong>红色标注：</strong>Trace 2 strain = Trace 3 strain（第2次和第3次实验的应变值完全相等）<br>
+<strong>绿色标注：</strong>Trace 3 stress = Trace 2 stress &times; 0.882（第3次应力可由第2次精确推导）<br>
+实际物理实验中，三次独立测量不可能存在如此精确的线性关系，误差应为0。
+</p>
 </div>
-<div class="compare-card">
-<div class="tag real">真实实验数据</div>
-<h4>正常力学测试应有的样子</h4>
-<svg viewBox="0 0 260 160" width="100%" style="max-width:260px">
-<rect x="0" y="0" width="260" height="160" fill="#111627" rx="6"/>
-<line x1="30" y1="130" x2="240" y2="130" stroke="#3a4570" stroke-width=".6"/>
-<line x1="30" y1="30" x2="30" y2="130" stroke="#3a4570" stroke-width=".6"/>
-<path d="M32,121 Q55,63 85,72 Q115,78 145,57 Q175,52 205,71 Q225,82 238,86" stroke="#ff6b6b" stroke-width="1.5" fill="none" opacity="0.7"/>
-<path d="M32,119 Q55,58 85,68 Q115,82 145,52 Q175,47 205,70 Q225,80 238,83" stroke="#2ecc71" stroke-width="1.5" fill="none" opacity="0.7"/>
-<path d="M32,123 Q55,67 85,76 Q115,85 145,60 Q175,55 205,73 Q225,85 238,88" stroke="#3498db" stroke-width="1.5" fill="none" opacity="0.7"/>
-<text x="70" y="18" fill="#2ecc71" font-size="8">3 条曲线各有波动，不完全一致</text>
-<text x="140" y="150" fill="#6b7394" font-size="6">应变</text>
-<text x="10" y="70" fill="#6b7394" font-size="6">应力</text>
-</svg>
-<p style="font-size:.72em;color:#6b7394;margin-top:6px">真实实验必有仪器误差、样本差异等随机噪声</p>
+
+<div class="evidence-list" style="margin-top:12px">
+<div class="e-item">
+<div class="e-icon green">&#10003;</div>
+<div class="e-body"><strong>论文信息</strong> <span class="badge">Nature Electronics 2024</span><p>Accelerated intestinal wound healing via dual electrostimulation from a soft and biodegradable electronic bandage. 通讯作者：常凌乾（北航医工学院副院长、国家杰青）</p></div>
+</div>
+<div class="e-item">
+<div class="e-icon green">&#10003;</div>
+<div class="e-body"><strong>耿同学质疑核心</strong> <span class="badge">数据造假</span><p>论文声称力学实验重复3次并以均值&plusmn;标准差呈现，但第2、3次实验数据可通过固定数学公式从第1次完美推算，不存在任何随机误差，违背物理实验基本规律。</p></div>
 </div>
 </div>
 
