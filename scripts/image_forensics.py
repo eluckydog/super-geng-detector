@@ -31,14 +31,13 @@ def prnu_extract(image_path: str) -> dict:
     except Exception as e:
         return {"error": f"无法加载图片: {e}"}
 
-    # 去噪获得噪声残差（使用小波或简单的高通滤波）
+    # 去噪获得噪声残差（使用高通滤波）
     denoised = ndimage.median_filter(img_array, size=3)
     noise_residual = img_array - denoised
 
-    # 提取 PRNU 估计
-    # PRNU = E(noise_residual * intensity) / E(intensity^2)
-    intensity = img_array / 255.0
-    intensity = np.clip(intensity, 1e-6, 1.0)
+    # 提取 PRNU 估计（传感器指纹 = 残差与强度相关项的归一化估计）
+    intensity = np.clip(img_array / 255.0, 1e-6, 1.0)
+    # 用平面估计（mean residual / mean intensity^2）作为传感器指纹的标量统计
     prnu = np.mean(noise_residual * intensity) / np.mean(intensity ** 2)
 
     # PRNU 空间变异性
@@ -68,7 +67,24 @@ def prnu_extract(image_path: str) -> dict:
         "prnu_spatial_variation": float(prnu_std),
         "prnu_block_cv": prnu_cv,
         "n_blocks": len(block_prnus),
+        # 返回噪声残差图用于真实 PRNU 比对（传感器指纹的逐像素相关）
+        "noise_residual": noise_residual,
     }
+
+
+def _prnu_correlation(residual_a: np.ndarray, residual_b: np.ndarray) -> float:
+    """
+    两张图像的噪声残差间的皮尔逊相关系数（PRNU 真实比对指标）。
+    同一相机拍摄 → 残差高度相关；不同相机 → 接近 0。
+    """
+    # 裁剪到相同尺寸
+    h = min(residual_a.shape[0], residual_b.shape[0])
+    w = min(residual_a.shape[1], residual_b.shape[1])
+    a = residual_a[:h, :w].ravel().astype(np.float64)
+    b = residual_b[:h, :w].ravel().astype(np.float64)
+    if a.std() < 1e-8 or b.std() < 1e-8:
+        return 0.0
+    return float(np.corrcoef(a, b)[0, 1])
 
 
 def prnu_compare(image_path_a: str, image_path_b: str) -> dict:
@@ -84,29 +100,29 @@ def prnu_compare(image_path_a: str, image_path_b: str) -> dict:
         return {"error": "无法提取 PRNU 指纹",
                 "details": [fa.get("error", ""), fb.get("error", "")]}
 
-    # 归一化 PRNU 幅值比较
+    # 真实 PRNU 比对：基于噪声残差图的皮尔逊相关系数（PCC）
+    similarity = _prnu_correlation(fa["noise_residual"], fb["noise_residual"])
+
+    # 辅助：标量指纹幅值一致性（仅作参考，不主导判定）
     pa = fa["prnu_magnitude"]
     pb = fb["prnu_magnitude"]
-    similarity = 1 - abs(pa - pb) / (abs(pa) + abs(pb) + 1e-10)
+    magnitude_sim = 1 - abs(pa - pb) / (abs(pa) + abs(pb) + 1e-10)
 
-    # PRNU 变异系数比较
-    cv_similarity = 1 - abs(fa["prnu_block_cv"] - fb["prnu_block_cv"]) / (
-        max(fa["prnu_block_cv"], fb["prnu_block_cv"], 1e-10) * 2 + 1e-10
-    )
-
-    combined_sim = 0.6 * similarity + 0.4 * cv_similarity
-
-    if combined_sim > 0.85:
-        verdict = "🚨 PRNU 高度相似（{:.2f}）→ 两张图片极可能来自同一相机/传感器".format(combined_sim)
-    elif combined_sim > 0.7:
-        verdict = "⚠️ PRNU 中度相似（{:.2f}）→ 建议进一步检查".format(combined_sim)
+    # 绝对 PCC 越高，越可能同一传感器。经验分级（随机噪声 PCC 接近 0）。
+    if similarity > 0.4:
+        verdict = "🚨 PRNU 高度相似（PCC={:.2f}）→ 两张图片极可能来自同一相机/传感器".format(similarity)
+        severity = "high"
+    elif similarity > 0.2:
+        verdict = "⚠️ PRNU 中度相似（PCC={:.2f}）→ 建议进一步检查".format(similarity)
+        severity = "mild"
     else:
-        verdict = f"✅ PRNU 差异显著（{combined_sim:.2f}）→ 不同相机拍摄"
+        verdict = f"✅ PRNU 差异显著（PCC={similarity:.2f}）→ 不同相机拍摄"
+        severity = "normal"
 
     return {
-        "prnu_similarity": float(combined_sim),
-        "magnitude_similarity": float(similarity),
-        "cv_similarity": float(cv_similarity),
+        "prnu_similarity": float(similarity),
+        "magnitude_similarity": float(magnitude_sim),
+        "severity": severity,
         "verdict": verdict,
     }
 
@@ -132,23 +148,8 @@ def noise_variance_analysis(image_path: str) -> dict:
 
     h, w = img_array.shape
 
-    # 分块
-    block_sizes = [32, 64]
-    all_blocks = []
-
-    for bs in block_sizes:
-        for i in range(0, h - bs, bs // 2):
-            for j in range(0, w - bs, bs // 2):
-                block = img_array[i:i+bs, j:j+bs]
-                # 高通滤波取得噪声
-                smoothed = ndimage.median_filter(block, size=3)
-                noise = block - smoothed
-                var = float(np.var(noise))
-                all_blocks.append({
-                    "position": (i, j),
-                    "size": bs,
-                    "noise_variance": var,
-                })
+    # 分块提取每块噪声方差
+    all_blocks = _extract_noise_blocks(img_array, h, w)
 
     if not all_blocks:
         return {"error": "图像太小"}
@@ -158,17 +159,8 @@ def noise_variance_analysis(image_path: str) -> dict:
     std_var = np.std(variances)
     cv_var = std_var / mean_var if mean_var > 0 else 0
 
-    # 检测异常块
-    z_scores = [(v - mean_var) / std_var for v in variances]
-    anomalies = []
-    for i, z in enumerate(z_scores):
-        if abs(z) > 2.5:
-            b = all_blocks[i]
-            anomalies.append({
-                "position": b["position"],
-                "z_score": float(z),
-                "variance": float(variances[i]),
-            })
+    # 检测异常块（|z| > 2.5）
+    anomalies = _detect_noise_anomalies(all_blocks, variances, mean_var, std_var)
 
     if len(anomalies) > len(all_blocks) * 0.15:
         verdict = f"🚨 噪声方差高度不均（{len(anomalies)}/{len(all_blocks)} 块异常）→ 疑似图像拼接"
@@ -187,6 +179,40 @@ def noise_variance_analysis(image_path: str) -> dict:
         "anomaly_details": anomalies[:5],
         "verdict": verdict,
     }
+
+
+def _extract_noise_blocks(img_array, h, w):
+    """将图像分块（32/64）并提取每块的高通噪声方差。"""
+    all_blocks = []
+    for bs in (32, 64):
+        for i in range(0, h - bs, bs // 2):
+            for j in range(0, w - bs, bs // 2):
+                block = img_array[i:i+bs, j:j+bs]
+                smoothed = ndimage.median_filter(block, size=3)
+                noise = block - smoothed
+                all_blocks.append({
+                    "position": (i, j),
+                    "size": bs,
+                    "noise_variance": float(np.var(noise)),
+                })
+    return all_blocks
+
+
+def _detect_noise_anomalies(all_blocks, variances, mean_var, std_var):
+    """用 z 分数检测噪声方差异常块。"""
+    if std_var <= 0:
+        return []
+    anomalies = []
+    for i, v in enumerate(variances):
+        z = (v - mean_var) / std_var
+        if abs(z) > 2.5:
+            b = all_blocks[i]
+            anomalies.append({
+                "position": b["position"],
+                "z_score": float(z),
+                "variance": float(v),
+            })
+    return anomalies
 
 
 # ═══════════════════════════════════════════════════════════
@@ -218,68 +244,75 @@ def detect_double_jpeg(image_path: str) -> dict:
     else:
         img_gray = img_array
 
-    # 分块 DCT
+    # 分块 DCT 提取高频 AC 系数
+    ac_coeffs = _extract_ac_coeffs(img_gray)
+    if ac_coeffs is None:
+        return {"error": "图像太小"}
+    if ac_coeffs.size == 0:
+        return {"error": "无法计算 DCT 系数"}
+
+    best_align, best_q = _best_quant_alignment(ac_coeffs)
+    if best_align is None:
+        return {"error": "有效 AC 系数不足"}
+
+    # 对齐度越高，说明 AC 系数越"人为地"对齐到某量化网格，
+    # 是双重压缩（两次量化）的典型特征。以经验阈值分级判定。
+    if best_align > 0.85:
+        verdict = "🚨 检测到强 JPEG 双重压缩特征（对齐度 {:.2f}，q={}）→ 图片可能被篡改后重新保存".format(best_align, best_q)
+        severity = "high"
+    elif best_align > 0.70:
+        verdict = "⚠️ 存在 JPEG 双重压缩的弱特征（对齐度 {:.2f}，q={}）".format(best_align, best_q)
+        severity = "mild"
+    else:
+        verdict = "✅ 未检测到明显双重压缩特征（对齐度 {:.2f}）".format(best_align)
+        severity = "normal"
+
+    return {
+        "n_dct_blocks": ac_coeffs.size,
+        "best_quant_step": best_q,
+        "alignment_score": float(best_align),
+        "severity": severity,
+        "verdict": verdict,
+    }
+
+
+def _extract_ac_coeffs(img_gray: np.ndarray):
+    """对灰度图做 8x8 分块 DCT，提取全部高频 AC 系数（跳过 DC）。"""
     h, w = img_gray.shape
     h_blocks = h // 8
     w_blocks = w // 8
     if h_blocks < 4 or w_blocks < 4:
-        return {"error": "图像太小"}
+        return None
 
-    dct_coeffs = []
+    ac_coeffs = []
     for i in range(h_blocks):
         for j in range(w_blocks):
             block = img_gray[i*8:(i+1)*8, j*8:(j+1)*8]
             if block.shape == (8, 8):
-                dct_block = fftpack.dct(fftpack.dct(block.T, norm='ortho').T, norm='ortho')
-                dct_coeffs.append(dct_block)
+                dct_block = fftpack.dct(
+                    fftpack.dct(block.T, norm='ortho').T, norm='ortho')
+                for x in range(8):
+                    for y in range(8):
+                        if x > 0 or y > 0:  # 跳过 DC
+                            ac_coeffs.append(dct_block[x, y])
+    return np.array(ac_coeffs)
 
-    if not dct_coeffs:
-        return {"error": "无法计算 DCT 系数"}
 
-    # 提取高频 AC 系数
-    ac_coeffs = []
-    for dct in dct_coeffs:
-        for x in range(8):
-            for y in range(8):
-                if x > 0 or y > 0:  # 跳过 DC
-                    ac_coeffs.append(dct[x, y])
+def _best_quant_alignment(ac_coeffs: np.ndarray):
+    """在候选量化步长上求最佳对齐度（双重压缩证据强度）。"""
+    ac_abs = np.abs(ac_coeffs)
+    ac_abs = ac_abs[ac_abs > 1e-3]  # 去除接近零的系数
+    if ac_abs.size == 0:
+        return None, 0
 
-    ac_coeffs = np.array(ac_coeffs)
-
-    # 量化步长的周期性检测
-    # 双重压缩时，第二层的量化步长会在整数倍处产生峰值
-    ac_int = np.round(ac_coeffs).astype(int)
-    ac_int = ac_int[np.abs(ac_int) < 20]
-
-    # 计算直方图
-    hist, _ = np.histogram(ac_int, bins=np.arange(-20, 21))
-    total = np.sum(hist)
-
-    # 检测整数倍位置是否有异常峰值
-    # 第一次压缩的量化步长会导致 DCT 系数在特定值上聚集
-    hist_norm = hist / total if total > 0 else hist
-
-    # 检测周期性模式（傅里叶分析直方图）
-    hist_fft = np.abs(np.fft.fft(hist_norm))
-    peak_freqs = np.argsort(hist_fft[1:len(hist_fft)//2])[-3:][::-1]
-
-    # 如果存在显著的周期性 → 双重压缩
-    max_peak = float(np.max(hist_fft[1:len(hist_fft)//2]))
-    mean_fft = float(np.mean(hist_fft[1:len(hist_fft)//2]))
-    periodicity = max_peak / mean_fft if mean_fft > 0 else 1
-
-    if periodicity > 5:
-        verdict = "🚨 检测到 JPEG 双重压缩特征 → 图片可能被篡改后重新保存"
-    elif periodicity > 3:
-        verdict = "⚠️ 存在 JPEG 双重压缩的弱特征"
-    else:
-        verdict = "✅ 未检测到明显双重压缩特征"
-
-    return {
-        "n_dct_blocks": len(dct_coeffs),
-        "periodicity_score": float(periodicity),
-        "verdict": verdict,
-    }
+    best_align, best_q = 0.0, 0
+    for q in np.arange(1, 16, dtype=float):
+        aligned = np.abs(np.round(ac_abs / q) * q - ac_abs)
+        align_ratio = float(np.mean(aligned < 0.5 * q))
+        if align_ratio > best_align:
+            best_align = align_ratio
+            best_q = int(q)
+    return best_align, best_q
 
 
 # ═══════════════════════════════════════════════════════════
@@ -318,20 +351,10 @@ def detect_copy_move(image_path: str,
     if descriptors is None or len(keypoints) < 20:
         return {"error": "特征点不足", "n_keypoints": len(keypoints) if keypoints else 0}
 
-    # 特征匹配
+    # 特征匹配 + 过滤自匹配
     bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
     matches = bf.match(descriptors, descriptors)
-
-    # 过滤好的匹配（距离小 + 排除自匹配）
-    good_matches = []
-    for m in matches:
-        if m.distance < 50:  # 距离阈值
-            p1 = keypoints[m.queryIdx].pt
-            p2 = keypoints[m.trainIdx].pt
-            # 排除自匹配和距离太近
-            dist = np.sqrt((p1[0] - p2[0]) ** 2 + (p1[1] - p2[1]) ** 2)
-            if dist > 20:
-                good_matches.append((p1, p2, m.distance))
+    good_matches = _filter_good_matches(matches, keypoints)
 
     if len(good_matches) < min_cluster:
         return {
@@ -341,25 +364,8 @@ def detect_copy_move(image_path: str,
             "verdict": "✅ 未检测到 copy-move 伪造",
         }
 
-    # 聚类匹配对的偏移向量
-    offsets = []
-    for p1, p2, _ in good_matches:
-        offset = (p2[0] - p1[0], p2[1] - p1[1])
-        offsets.append(offset)
-
-    # 简单聚类：找出现频率最高的偏移向量
-    from collections import Counter
-    offset_counter = Counter(offsets)
-    most_common = offset_counter.most_common(10)
-
-    # 检测是否有偏移向量频繁出现
-    clusters = []
-    for offset, count in most_common:
-        if count >= min_cluster:
-            clusters.append({
-                "offset": offset,
-                "count": count,
-            })
+    # 聚类匹配对的偏移向量，检测频繁出现的重复区域
+    clusters = _cluster_offsets(good_matches, min_cluster)
 
     if clusters:
         n_clusters = len(clusters)
@@ -377,6 +383,32 @@ def detect_copy_move(image_path: str,
         "clusters": clusters[:5],
         "verdict": verdict,
     }
+
+
+def _filter_good_matches(matches, keypoints):
+    """过滤匹配：去除自匹配与距离过近的点对，保留距离阈值内的特征对。"""
+    good = []
+    for m in matches:
+        if m.distance >= 50:  # 距离阈值
+            continue
+        p1 = keypoints[m.queryIdx].pt
+        p2 = keypoints[m.trainIdx].pt
+        dist = np.sqrt((p1[0] - p2[0]) ** 2 + (p1[1] - p2[1]) ** 2)
+        if dist > 20:  # 排除自匹配和距离太近
+            good.append((p1, p2, m.distance))
+    return good
+
+
+def _cluster_offsets(good_matches, min_cluster):
+    """聚类匹配对的偏移向量，返回频繁出现的重复区域。"""
+    from collections import Counter
+    offsets = [(p2[0] - p1[0], p2[1] - p1[1]) for p1, p2, _ in good_matches]
+    offset_counter = Counter(offsets)
+    clusters = []
+    for offset, count in offset_counter.most_common(10):
+        if count >= min_cluster:
+            clusters.append({"offset": offset, "count": count})
+    return clusters
 
 
 # ═══════════════════════════════════════════════════════════

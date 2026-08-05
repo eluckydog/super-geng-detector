@@ -15,8 +15,17 @@ super_geng.py — 超级耿同学学术打假检测器 主入口
 import sys
 import os
 import json
+import logging
 import argparse
 from pathlib import Path
+import numpy as np
+
+# Windows 控制台默认 GBK 编码无法输出 emoji/部分中文，强制 stdout 为 UTF-8
+try:
+    sys.stdout.reconfigure(encoding="utf-8")
+    sys.stderr.reconfigure(encoding="utf-8")
+except Exception:
+    pass
 
 # 添加 scripts 目录到路径
 sys.path.insert(0, str(Path(__file__).parent))
@@ -164,16 +173,46 @@ def run_stem_engine(text: str, data_extraction_fn=None) -> dict:
     findings = []
     quotes = []
 
-    # 第一式：Benford（需要数据）
-    # 如果有数据提取函数，提取表格数据
+    # 第一式：Benford / 数值法医（需要数据）
+    # 如果有数据提取函数，提取表格数据并真正运行 stats_forensics
     if data_extraction_fn:
         try:
             data = data_extraction_fn(text)
             if data:
-                benford_result = {
-                    "key": "benford_suite",
-                    "category": "stem_numeric",
-                }
+                # 将提取到的二维宽表（每行一个观测，每列一个变量）转换为
+                # full_stats_arsenal 期望的"列级 summary"结构：
+                #   List[Dict]，每个 dict = 一列，含
+                #     - "values": 该列所有数值（供 Benford / 末位检测）
+                #     - "mean"/"sd"/"n": 列统计量（供 GRIM / SD 模式检测）
+                #     - "columns": 该列数值（供列间差值检测）
+                n_cols = max(len(row) for row in data) if data else 0
+                col_names = [f"col_{i+1}" for i in range(n_cols)]
+                table = []
+                for c in range(n_cols):
+                    col_values = []
+                    for row in data:
+                        if c < len(row):
+                            try:
+                                col_values.append(float(row[c]))
+                            except (ValueError, TypeError):
+                                pass
+                    if col_values:
+                        arr = np.array(col_values, dtype=float)
+                        table.append({
+                            "values": col_values,
+                            "mean": float(np.mean(arr)),
+                            "sd": float(np.std(arr, ddof=0)),
+                            "n": len(arr),
+                            "columns": col_values,
+                            "name": col_names[c],
+                        })
+                if table:
+                    stats_result = full_stats_arsenal(table)
+                    findings.append({
+                        "key": "benford_suite",
+                        "category": "stem_numeric",
+                        **stats_result,
+                    })
         except Exception as e:
             logger = logging.getLogger(__name__)
             logger.warning(f"Benford data extraction failed: {e}")
@@ -310,6 +349,165 @@ def generate_report(paper_path: str, mode: str, stem_result: dict = None,
 # CLI
 # ═══════════════════════════════════════════════════════════
 
+def _build_stats_table(data_columns):
+    """把 CSV 提取出的数值列列表构造为 full_stats_arsenal 期望的列级 summary。"""
+    import numpy as np
+    table = []
+    for col in data_columns:
+        arr = np.array(col, dtype=float)
+        table.append({
+            "values": col,
+            "mean": float(np.mean(arr)),
+            "sd": float(np.std(arr, ddof=0)),
+            "n": len(arr),
+            "columns": col,
+        })
+    return table
+
+
+def _read_pdf_text(paper_path):
+    """用 pdftotext 或 PyPDF2 提取 PDF 文本，失败返回空串并记录 warning。"""
+    text = ""
+    try:
+        import subprocess
+        result = subprocess.run(
+            ["pdftotext", paper_path, "-"],
+            capture_output=True, text=True, timeout=30
+        )
+        if result.returncode == 0:
+            text = result.stdout
+        else:
+            try:
+                from PyPDF2 import PdfReader
+                reader = PdfReader(paper_path)
+                text = "\n".join(
+                    page.extract_text() or ""
+                    for page in reader.pages
+                )
+            except ImportError:
+                logging.getLogger(__name__).warning(
+                    "PyPDF2 未安装，PDF 文本提取跳过")
+    except Exception as e:
+        print(f"[WARN] PDF text extraction failed: {e}")
+    return text
+
+
+def _cmd_detect(args):
+    paper_path = args.paper
+    if not os.path.exists(paper_path):
+        print(f"❌ 文件不存在: {paper_path}")
+        sys.exit(1)
+
+    print(f"📄 读取论文: {paper_path}")
+    text = _read_pdf_text(paper_path)
+
+    if not text or len(text) < 100:
+        print("⚠️ 无法提取文本，请确保已安装 pdftotext 或 PyPDF2")
+        print("  将跳过文本分析，仅对可提取数据运行检测")
+        text = ""
+
+    # 分类
+    if args.mode == "auto":
+        mode = classify_paper(text) if text else "stem"
+        print(f"🔍 自动分类: {mode}")
+    else:
+        mode = args.mode
+
+    stem_result, humanities_result = _run_detect_engine(mode, text)
+
+    report = generate_report(paper_path, mode, stem_result, humanities_result)
+    _output_detect_result(args, stem_result, humanities_result, report)
+
+
+def _run_detect_engine(mode, text):
+    """根据检测模式运行对应引擎，返回 (stem_result, humanities_result)。"""
+    stem_result = None
+    humanities_result = None
+    if mode == "stem":
+        print("⚙️ 运行理工科引擎...")
+        stem_result = run_stem_engine(text)
+    elif mode == "humanities":
+        print("⚙️ 运行文科引擎...")
+        humanities_result = run_humanities_engine(text)
+    return stem_result, humanities_result
+
+
+def _output_detect_result(args, stem_result, humanities_result, report):
+    """按用户指定（json/文件/控制台）输出检测结果。"""
+    if args.json:
+        syn = synthesize_evidence(
+            (stem_result or {}).get("findings", []) +
+            (humanities_result or {}).get("findings", [])
+        )
+        print(json.dumps(syn, indent=2, ensure_ascii=False))
+    else:
+        print(report)
+
+    if args.output:
+        with open(args.output, 'w', encoding='utf-8') as f:
+            f.write(report)
+        print(f"\n📝 报告已保存至: {args.output}")
+
+
+def _cmd_stats(args):
+    import csv
+    if not os.path.exists(args.data_file):
+        print(f"❌ 文件不存在: {args.data_file}")
+        sys.exit(1)
+
+    with open(args.data_file, encoding='utf-8') as f:
+        rows = list(csv.reader(f))
+
+    if not rows:
+        print("❌ 空文件")
+        return
+
+    # 提取数值列
+    data_columns = []
+    n_cols = len(rows[0])
+    for col in range(n_cols):
+        values = []
+        for row in rows[1:]:
+            if col < len(row):
+                try:
+                    values.append(float(row[col]))
+                except (ValueError, TypeError):
+                    logging.getLogger(__name__).warning(
+                        f"跳过非数值单元格: row={row}, col={col}")
+        if len(values) >= 5:
+            data_columns.append(values)
+
+    if not data_columns:
+        print("❌ 未找到数值列")
+        return
+
+    print(f"📊 找到 {len(data_columns)} 列数值数据")
+    from stats_forensics import full_stats_arsenal
+    table = _build_stats_table(data_columns)
+    result = full_stats_arsenal(table)
+    print(json.dumps(result, indent=2, ensure_ascii=False))
+
+
+def _cmd_image(args):
+    from image_forensics import full_image_arsenal, compare_two_images
+    if args.compare:
+        result = compare_two_images(args.image_file, args.compare)
+    else:
+        result = full_image_arsenal(args.image_file)
+    print(json.dumps(result, indent=2, ensure_ascii=False))
+
+
+def _cmd_text(args):
+    if not os.path.exists(args.text_file):
+        print(f"❌ 文件不存在: {args.text_file}")
+        sys.exit(1)
+    with open(args.text_file, encoding='utf-8') as f:
+        text = f.read()
+    from text_forensics import full_text_arsenal
+    result = full_text_arsenal(text)
+    print(json.dumps(result, indent=2, ensure_ascii=False))
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="🔥 超级耿同学学术打假检测器",
@@ -326,7 +524,6 @@ def main():
 
     subparsers = parser.add_subparsers(dest="command", help="子命令")
 
-    # detect 命令
     detect_parser = subparsers.add_parser("detect", help="检测论文")
     detect_parser.add_argument("paper", help="论文 PDF 文件路径")
     detect_parser.add_argument("--mode", choices=["auto", "stem", "humanities"],
@@ -334,16 +531,13 @@ def main():
     detect_parser.add_argument("--output", "-o", help="输出报告文件路径")
     detect_parser.add_argument("--json", action="store_true", help="JSON 格式输出")
 
-    # stats 命令
     stats_parser = subparsers.add_parser("stats", help="数值法医快速检测")
     stats_parser.add_argument("data_file", help="CSV 数据文件")
 
-    # image 命令
     image_parser = subparsers.add_parser("image", help="图像法医检测")
     image_parser.add_argument("image_file", help="图片文件路径")
     image_parser.add_argument("--compare", help="对比图片路径（PRNU 比对）")
 
-    # text 命令
     text_parser = subparsers.add_parser("text", help="文本法医检测")
     text_parser.add_argument("text_file", help="文本文件路径")
 
@@ -353,144 +547,13 @@ def main():
         parser.print_help()
         return
 
-    if args.command == "detect":
-        # 读取论文
-        paper_path = args.paper
-        if not os.path.exists(paper_path):
-            print(f"❌ 文件不存在: {paper_path}")
-            sys.exit(1)
-
-        print(f"📄 读取论文: {paper_path}")
-
-        # 尝试读取 PDF
-        text = ""
-        try:
-            import subprocess
-            # 用 pdftotext 提取文本
-            result = subprocess.run(
-                ["pdftotext", paper_path, "-"],
-                capture_output=True, text=True, timeout=30
-            )
-            if result.returncode == 0:
-                text = result.stdout
-            else:
-                # 尝试 PyPDF2
-                try:
-                    from PyPDF2 import PdfReader
-                    reader = PdfReader(paper_path)
-                    text = "\n".join(
-                        page.extract_text() or ""
-                        for page in reader.pages
-                    )
-                except ImportError:
-                    pass
-        except Exception as e:
-            print(f"[WARN] PDF text extraction failed: {e}")
-
-        if not text or len(text) < 100:
-            print("⚠️ 无法提取文本，请确保已安装 pdftotext 或 PyPDF2")
-            print("  将跳过文本分析，仅对可提取数据运行检测")
-            text = ""
-
-        # 分类
-        if args.mode == "auto":
-            mode = classify_paper(text) if text else "stem"
-            print(f"🔍 自动分类: {mode}")
-        else:
-            mode = args.mode
-
-        # 运行引擎
-        stem_result = None
-        humanities_result = None
-
-        if mode == "stem":
-            print("⚙️ 运行理工科引擎...")
-            stem_result = run_stem_engine(text)
-        elif mode == "humanities":
-            print("⚙️ 运行文科引擎...")
-            humanities_result = run_humanities_engine(text)
-
-        # 生成报告
-        report = generate_report(paper_path, mode, stem_result, humanities_result)
-
-        if args.json:
-            syn = synthesize_evidence(
-                (stem_result or {}).get("findings", []) +
-                (humanities_result or {}).get("findings", [])
-            )
-            print(json.dumps(syn, indent=2, ensure_ascii=False))
-        else:
-            print(report)
-
-        if args.output:
-            with open(args.output, 'w', encoding='utf-8') as f:
-                f.write(report)
-            print(f"\n📝 报告已保存至: {args.output}")
-
-    elif args.command == "stats":
-        import csv
-        if not os.path.exists(args.data_file):
-            print(f"❌ 文件不存在: {args.data_file}")
-            sys.exit(1)
-
-        with open(args.data_file, encoding='utf-8') as f:
-            reader = csv.reader(f)
-            rows = list(reader)
-
-        if not rows:
-            print("❌ 空文件")
-            return
-
-        # 提取数值列
-        import numpy as np
-        data_columns = []
-        header = rows[0]
-        n_cols = len(header)
-
-        for col in range(n_cols):
-            values = []
-            for row in rows[1:]:
-                if col < len(row):
-                    try:
-                        values.append(float(row[col]))
-                    except (ValueError, TypeError):
-                        pass
-            if len(values) >= 5:
-                data_columns.append(values)
-
-        if not data_columns:
-            print("❌ 未找到数值列")
-            return
-
-        print(f"📊 找到 {len(data_columns)} 列数值数据")
-        from stats_forensics import full_stats_arsenal
-
-        # 构造数据表
-        table = [{"values": col} for col in data_columns]
-        result = full_stats_arsenal(table)
-        print(json.dumps(result, indent=2, ensure_ascii=False))
-
-    elif args.command == "image":
-        from image_forensics import full_image_arsenal, compare_two_images
-
-        if args.compare:
-            result = compare_two_images(args.image_file, args.compare)
-        else:
-            result = full_image_arsenal(args.image_file)
-
-        print(json.dumps(result, indent=2, ensure_ascii=False))
-
-    elif args.command == "text":
-        if not os.path.exists(args.text_file):
-            print(f"❌ 文件不存在: {args.text_file}")
-            sys.exit(1)
-
-        with open(args.text_file, encoding='utf-8') as f:
-            text = f.read()
-
-        from text_forensics import full_text_arsenal
-        result = full_text_arsenal(text)
-        print(json.dumps(result, indent=2, ensure_ascii=False))
+    dispatch = {
+        "detect": _cmd_detect,
+        "stats": _cmd_stats,
+        "image": _cmd_image,
+        "text": _cmd_text,
+    }
+    dispatch[args.command](args)
 
 
 if __name__ == "__main__":

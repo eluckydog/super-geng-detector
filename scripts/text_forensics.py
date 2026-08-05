@@ -11,6 +11,7 @@ HMM 驱动的文本分析：
 """
 import re
 import math
+import logging
 import numpy as np
 from collections import Counter
 from typing import List, Tuple, Dict, Any, Optional
@@ -132,41 +133,13 @@ def detect_style_shifts(text: str,
     X_std[X_std == 0] = 1.0
     X_norm = (X - X_mean) / X_std
 
-    # 风格变化检测（无 HMM 备选方案）
-    # 计算相邻窗口间的余弦距离
-    style_shifts = []
-    for i in range(1, len(X_norm)):
-        cos_sim = np.dot(X_norm[i], X_norm[i-1]) / (
-            np.linalg.norm(X_norm[i]) * np.linalg.norm(X_norm[i-1]) + 1e-10
-        )
-        style_shifts.append({
-            "position": i * (window_size // 2),
-            "cosine_similarity": float(cos_sim),
-            "is_shift": bool(cos_sim < 0.7),
-        })
-
+    # 风格变化检测：相邻窗口余弦相似度 + 基于分布的显著性判定
+    style_shifts = _compute_style_shift_windows(X_norm, window_size)
     n_shifts = sum(1 for s in style_shifts if s["is_shift"])
     shift_ratio = n_shifts / len(style_shifts) if style_shifts else 0
 
-    # HMM 状态数推断
-    if _HAS_HMM and len(windows) >= 10:
-        try:
-            best_n_states = _infer_hmm_states(X_norm, max_states=5)
-        except (ValueError, RuntimeError) as e:
-            import logging
-            logger = logging.getLogger(__name__)
-            logger.warning(f"HMM state inference failed, falling back to clustering: {e}")
-            best_n_states = 1
-    else:
-        # 简化的状态数推断：聚类
-        from scipy.cluster.hierarchy import fcluster, linkage
-        if len(X_norm) >= 4:
-            Z = linkage(X_norm, method='ward')
-            max_d = 2.0
-            clusters = fcluster(Z, max_d, criterion='distance')
-            best_n_states = len(set(clusters))
-        else:
-            best_n_states = 1
+    # 状态数推断（HMM 或聚类备选）
+    best_n_states = _infer_n_states(X_norm, windows)
 
     # 判定
     if best_n_states >= 3 and shift_ratio > 0.3:
@@ -188,6 +161,48 @@ def detect_style_shifts(text: str,
         "shift_ratio": float(shift_ratio),
         "verdict": verdict,
     }
+
+
+def _compute_style_shift_windows(X_norm: np.ndarray, window_size: int):
+    """计算相邻窗口风格余弦相似度，并基于分布显著性标记风格突变。"""
+    style_shifts = []
+    for i in range(1, len(X_norm)):
+        cos_sim = np.dot(X_norm[i], X_norm[i-1]) / (
+            np.linalg.norm(X_norm[i]) * np.linalg.norm(X_norm[i-1]) + 1e-10
+        )
+        style_shifts.append({
+            "position": i * (window_size // 2),
+            "cosine_similarity": float(cos_sim),
+            "is_shift": False,
+        })
+
+    # 基于相邻余弦相似度的分布显著性判定（避免固定 0.7 阈值的误报）：
+    # 仅当某窗口相似度显著低于整体分布（< mean - 2*std）才标记为风格突变
+    if style_shifts:
+        sims = np.array([s["cosine_similarity"] for s in style_shifts])
+        threshold = float(np.mean(sims)) - 2 * float(np.std(sims))
+        for s in style_shifts:
+            s["is_shift"] = bool(s["cosine_similarity"] < threshold)
+            s["shift_threshold"] = threshold
+    return style_shifts
+
+
+def _infer_n_states(X_norm: np.ndarray, windows: list) -> int:
+    """推断写作风格状态数（优先 HMM，否则退化为层次聚类）。"""
+    if _HAS_HMM and len(windows) >= 10:
+        try:
+            return _infer_hmm_states(X_norm, max_states=5)
+        except (ValueError, RuntimeError) as e:
+            logging.getLogger(__name__).warning(
+                f"HMM state inference failed, falling back to clustering: {e}")
+            return 1
+    # 简化的状态数推断：层次聚类
+    from scipy.cluster.hierarchy import fcluster, linkage
+    if len(X_norm) >= 4:
+        Z = linkage(X_norm, method='ward')
+        clusters = fcluster(Z, 2.0, criterion='distance')
+        return len(set(clusters))
+    return 1
 
 
 def _infer_hmm_states(X: np.ndarray, max_states: int = 5) -> int:
@@ -241,6 +256,70 @@ def detect_ai_generated_text(text: str) -> dict:
     if len(sentences) < 5:
         return {"error": "文本太短"}
 
+    features = _compute_ai_features(text, sentences)
+    ttr, cv_len, burstiness, trigram_repeat_rate, comma_density = features
+    n_sentences = len(sentences)
+
+    score, reasons = _score_ai_features(
+        ttr, cv_len, burstiness, trigram_repeat_rate, comma_density, n_sentences)
+
+    # 判定
+    if score >= 0.5:
+        verdict = f"🚨 高概率为 AI 生成文本（得分 {score:.2f}/1.0）"
+    elif score >= 0.3:
+        verdict = f"⚠️ 部分段落疑似 AI 生成（得分 {score:.2f}/1.0）"
+    elif score >= 0.15:
+        verdict = f"⚠️ 轻微 AI 特征（得分 {score:.2f}/1.0），可能为润色工具辅助"
+    else:
+        verdict = "✅ 未检测到明显 AI 生成特征"
+
+    return {
+        "sentences": n_sentences,
+        "words": len(re.findall(r'[\u4e00-\u9fff]{2,}|[a-zA-Z]{3,}', text)),
+        "ttr": float(ttr),
+        "sentence_cv": float(cv_len),
+        "burstiness": float(burstiness),
+        "trigram_repeat_rate": float(trigram_repeat_rate),
+        "ai_score": float(score),
+        "reasons": reasons,
+        "verdict": verdict,
+    }
+
+
+def _score_ai_features(ttr, cv_len, burstiness, trigram_repeat_rate,
+                       comma_density, n_sentences):
+    """根据 5 个风格特征累计 AI 生成概率评分与原因。"""
+    score = 0.0
+    reasons = []
+
+    if cv_len < 0.25:
+        score += 0.3
+        reasons.append(f"句长极为均匀（CV={cv_len:.3f}），典型 AI 特征")
+    elif cv_len < 0.35:
+        score += 0.15
+        reasons.append(f"句长偏均匀（CV={cv_len:.3f}），偏 AI 特征")
+
+    if ttr < 0.3 and n_sentences >= 10:
+        score += 0.2
+        reasons.append(f"词汇多样性偏低（TTR={ttr:.3f}）")
+
+    if burstiness < 0.5 and n_sentences >= 10:
+        score += 0.15
+        reasons.append(f"Burstiness 偏低（{burstiness:.3f}），缺乏人类写作的自然波动")
+
+    if comma_density > 0.08:
+        score += 0.1
+        reasons.append(f"逗号密度偏高（{comma_density:.3f}）")
+
+    if trigram_repeat_rate > 0.3:
+        score += 0.15
+        reasons.append(f"高频 trigram 重复（{trigram_repeat_rate:.2%}）")
+
+    return score, reasons
+
+
+def _compute_ai_features(text: str, sentences: list):
+    """计算 AI 文本检测的 5 个风格特征：TTR / 句长CV / Burstiness / Trigram重复率 / 逗号密度。"""
     # 1. TTR
     words = re.findall(r'[\u4e00-\u9fff]{2,}|[a-zA-Z]{3,}', text)
     unique_words = set(words)
@@ -251,10 +330,6 @@ def detect_ai_generated_text(text: str) -> dict:
     mean_len = np.mean(sent_lens)
     std_len = np.std(sent_lens)
     cv_len = std_len / mean_len if mean_len > 0 else 0
-
-    # AI 的句长 CV 通常更小（更均匀）
-    # 正常人类：CV 0.3-0.7
-    # AI：CV 0.15-0.35
 
     # 3. Burstiness（句子长度序列的自相关）
     if len(sent_lens) >= 4:
@@ -280,54 +355,7 @@ def detect_ai_generated_text(text: str) -> dict:
     total_chars = len(re.sub(r'\s+', '', text))
     comma_density = text.count('，') / total_chars if total_chars > 0 else 0
 
-    # 综合评分
-    score = 0.0
-    reasons = []
-
-    if cv_len < 0.25:
-        score += 0.3
-        reasons.append(f"句长极为均匀（CV={cv_len:.3f}），典型 AI 特征")
-    elif cv_len < 0.35:
-        score += 0.15
-        reasons.append(f"句长偏均匀（CV={cv_len:.3f}），偏 AI 特征")
-
-    if ttr < 0.3 and len(words) > 500:
-        score += 0.2
-        reasons.append(f"词汇多样性偏低（TTR={ttr:.3f}）")
-
-    if burstiness < 0.5 and len(sent_lens) >= 10:
-        score += 0.15
-        reasons.append(f"Burstiness 偏低（{burstiness:.3f}），缺乏人类写作的自然波动")
-
-    if comma_density > 0.08:
-        score += 0.1
-        reasons.append(f"逗号密度偏高（{comma_density:.3f}）")
-
-    if trigram_repeat_rate > 0.3:
-        score += 0.15
-        reasons.append(f"高频 trigram 重复（{trigram_repeat_rate:.2%}）")
-
-    # 判定
-    if score >= 0.5:
-        verdict = f"🚨 高概率为 AI 生成文本（得分 {score:.2f}/1.0）"
-    elif score >= 0.3:
-        verdict = f"⚠️ 部分段落疑似 AI 生成（得分 {score:.2f}/1.0）"
-    elif score >= 0.15:
-        verdict = f"⚠️ 轻微 AI 特征（得分 {score:.2f}/1.0），可能为润色工具辅助"
-    else:
-        verdict = "✅ 未检测到明显 AI 生成特征"
-
-    return {
-        "sentences": len(sentences),
-        "words": len(words),
-        "ttr": float(ttr),
-        "sentence_cv": float(cv_len),
-        "burstiness": float(burstiness),
-        "trigram_repeat_rate": float(trigram_repeat_rate),
-        "ai_score": float(score),
-        "reasons": reasons,
-        "verdict": verdict,
-    }
+    return ttr, cv_len, burstiness, trigram_repeat_rate, comma_density
 
 
 # ═══════════════════════════════════════════════════════════
@@ -367,33 +395,8 @@ def citation_consistency_check(text: str) -> dict:
     citation_density = n_cited / n_sentences if n_sentences > 0 else 0
 
     # 引用上下文标志
-    # 过度肯定的引用语言
-    overclaim_markers = [
-        '证实了', '毫无疑问', '充分证明', '完全支持', '明确表明',
-        'definitively', 'undoubtedly', 'conclusively',
-    ]
-    overclaims = []
-    for s in cited_sentences:
-        for marker in overclaim_markers:
-            if marker in s:
-                overclaims.append({"sentence": s[:80], "marker": marker})
-
-    # 引用聚类检测
-    if len(cited_sentences) >= 3:
-        citation_positions = []
-        for i, s in enumerate(sentences):
-            if re.search(r'\[[\d,\s\-]+\]|\[\d+\]', s):
-                citation_positions.append(i)
-
-        if len(citation_positions) >= 5:
-            # 检测 clusters — 连续句子都有引用（可疑：可能是在填引用）
-            diffs = np.diff(citation_positions)
-            clusters = sum(1 for d in diffs if d <= 2)
-            cluster_ratio = clusters / len(diffs) if len(diffs) > 0 else 0
-        else:
-            cluster_ratio = 0
-    else:
-        cluster_ratio = 0
+    overclaims = _detect_overclaim_markers(cited_sentences)
+    cluster_ratio = _detect_citation_clusters(sentences, cited_sentences, n_cited)
 
     # 判定
     issues = []
@@ -420,6 +423,38 @@ def citation_consistency_check(text: str) -> dict:
         "issues": issues,
         "verdict": verdict,
     }
+
+
+def _detect_overclaim_markers(cited_sentences: list) -> list:
+    """检测引用语句中的过度肯定表述。"""
+    markers = [
+        '证实了', '毫无疑问', '充分证明', '完全支持', '明确表明',
+        'definitively', 'undoubtedly', 'conclusively',
+    ]
+    overclaims = []
+    for s in cited_sentences:
+        for marker in markers:
+            if marker in s:
+                overclaims.append({"sentence": s[:80], "marker": marker})
+    return overclaims
+
+
+def _detect_citation_clusters(sentences: list, cited_sentences: list, n_cited: int) -> float:
+    """检测引用是否过度密集（连续句子都有引用）。"""
+    if len(cited_sentences) < 3:
+        return 0.0
+
+    citation_positions = [
+        i for i, s in enumerate(sentences)
+        if re.search(r'\[[\d,\s\-]+\]|\[\d+\]', s)
+    ]
+    if len(citation_positions) < 5:
+        return 0.0
+
+    # 连续句子都有引用（可疑：可能是在填引用）
+    diffs = np.diff(citation_positions)
+    clusters = sum(1 for d in diffs if d <= 2)
+    return clusters / len(diffs) if len(diffs) > 0 else 0.0
 
 
 # ═══════════════════════════════════════════════════════════
@@ -452,26 +487,9 @@ def argument_structure_analysis(text: str) -> dict:
                 claims.append(s)
                 break
 
-    # 检测理念类词汇（缺乏操作化定义）
-    vague_concepts = [
-        '范式', '话语', '场域', '建构', '解构', '后现代',
-        '异化', '主体性', '规训', '文化资本', '惯习',
-    ]
-    vague_uses = []
-    for s in sentences:
-        for v in vague_concepts:
-            if v in s:
-                vague_uses.append({"sentence": s[:100], "concept": v})
-                break  # 每句只计一次
-
-    # 缺乏数据的实证主张
-    data_markers = ['%', 'N=', 'n=', 'p<', 'p=', '显著', 'significant',
-                    't=', 'F=', 'χ²', 'r=', 'OR=', 'HR=', '表', '图']
-    unsupported_claims = []
-    for s in claims:
-        has_data = any(m in s for m in data_markers)
-        if not has_data:
-            unsupported_claims.append(s[:100])
+    # 检测模糊概念与无数据主张
+    vague_uses = _detect_vague_concepts(sentences)
+    unsupported_claims = _detect_unsupported_claims(claims)
 
     # 判定
     issues = []
@@ -498,6 +516,32 @@ def argument_structure_analysis(text: str) -> dict:
         "issues": issues,
         "verdict": verdict,
     }
+
+
+def _detect_vague_concepts(sentences: list) -> list:
+    """检测缺乏操作化定义的模糊理念类词汇使用。"""
+    vague_concepts = [
+        '范式', '话语', '场域', '建构', '解构', '后现代',
+        '异化', '主体性', '规训', '文化资本', '惯习',
+    ]
+    vague_uses = []
+    for s in sentences:
+        for v in vague_concepts:
+            if v in s:
+                vague_uses.append({"sentence": s[:100], "concept": v})
+                break  # 每句只计一次
+    return vague_uses
+
+
+def _detect_unsupported_claims(claims: list) -> list:
+    """检测缺乏数据支持的实证主张。"""
+    data_markers = ['%', 'N=', 'n=', 'p<', 'p=', '显著', 'significant',
+                    't=', 'F=', 'χ²', 'r=', 'OR=', 'HR=', '表', '图']
+    unsupported = []
+    for s in claims:
+        if not any(m in s for m in data_markers):
+            unsupported.append(s[:100])
+    return unsupported
 
 
 # ═══════════════════════════════════════════════════════════

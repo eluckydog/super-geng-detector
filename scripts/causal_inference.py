@@ -99,35 +99,33 @@ class CausalGraph:
         dfs(source, target, {source}, [source])
         return paths
 
+    def _node_triple_type(self, prev: str, node: str, nxt: str) -> str:
+        """判断三元组 (prev, node, nxt) 的因果结构类型。"""
+        forward = (prev, node) in self.edges and (node, nxt) in self.edges
+        backward = (nxt, node) in self.edges and (node, prev) in self.edges
+        fork = (prev, node) in self.edges and (nxt, node) in self.edges
+        if forward or backward:
+            return "chain"
+        if fork:
+            return "fork"
+        if (prev, node) in self.edges and (nxt, node) in self.edges:
+            return "collider"
+        return "none"
+
     def _is_path_blocked(self, path: List[str], Z: Set[str]) -> bool:
         """检查一条路径是否被 Z 阻断"""
         for i in range(1, len(path) - 1):
             node = path[i]
-            prev = path[i - 1]
-            next_node = path[i + 1]
+            triple = self._node_triple_type(path[i - 1], node, path[i + 1])
 
-            # Chain: A → B → C  or  A ← B ← C
-            is_chain_or_fork = (
-                ((prev, node) in self.edges and (node, next_node) in self.edges) or
-                ((next_node, node) in self.edges and (node, prev) in self.edges) or
-                ((prev, node) in self.edges and (next_node, node) in self.edges)
-            )
+            # Chain / Fork：被条件化时阻断
+            if triple in ("chain", "fork") and node in Z:
+                return True
 
-            # Collider: A → B ← C
-            is_collider = (
-                (prev, node) in self.edges and (next_node, node) in self.edges
-            )
-
-            if is_chain_or_fork and node in Z:
-                return True  # 被条件阻断
-
-            if is_collider:
-                # Collider 被条件化时打开路径，未条件化时阻断
-                if node not in Z:
-                    # 检查 collider 的后代是否在 Z 中
-                    descendants = self._descendants_of(node)
-                    if not (Z & descendants):
-                        return True  # collider 阻断
+            # Collider：未条件化且后代未被条件化时阻断
+            if triple == "collider" and node not in Z:
+                if not (Z & self._descendants_of(node)):
+                    return True
 
         return False
 
@@ -250,24 +248,50 @@ def build_causal_graph(claims: dict) -> CausalGraph:
     controls = [f"C{i+1}: {c[:20]}" for i, c in enumerate(claims["controls"][:5])]
     mediators = [f"M{i+1}: {m[:20]}" for i, m in enumerate(claims["mediators"][:3])]
 
-    # 默认结构：controls → {treatment, outcome}
-    for c in controls:
-        for t in treatments:
-            g.add_edge(c, t)
-        for y in outcomes:
-            g.add_edge(c, y)
+    # 默认结构：仅构建"主效应"边（treatment -> outcome）与中介路径，
+    # 这些是合法的因果假设，不应被判为后门。
+    _build_main_effect_edges(g, treatments, outcomes, mediators)
 
-    # Treatment → mediators → outcomes
+    # 关键修复：控制变量不再默认全连接到所有 treatment/outcome（原实现
+    # 的笛卡尔积会导致每条 treatment->outcome 都存在经 control 的后门路径，
+    # 造成必然误报）。仅当控制变量的原始声明文本中实际提及了某结果名时，
+    # 才连 control -> 该 outcome 边；treatment 同理。这样后门检测反映的是
+    # 文本真实声明的混淆结构，而非凭空构造。
+    control_text = " ".join(claims.get("controls", []))
+    _build_sparse_control_edges(g, controls, treatments, outcomes, control_text)
+
+    return g
+
+
+def _build_main_effect_edges(g, treatments, outcomes, mediators):
+    """构建 treatment->outcome 主效应边与 treatment->mediator->outcome 路径。"""
+    for t in treatments:
+        for y in outcomes:
+            g.add_edge(t, y)
     for t in treatments:
         for m in mediators:
             g.add_edge(t, m)
-        for y in outcomes:
-            g.add_edge(t, y)
     for m in mediators:
         for y in outcomes:
             g.add_edge(m, y)
 
-    return g
+
+def _build_sparse_control_edges(g, controls, treatments, outcomes, control_text):
+    """基于声明文本稀疏地连接控制变量边（避免默认全连接的必然误报）。"""
+    for c in controls:
+        c_name = c.lower()
+        for y in outcomes:
+            if c_name[:8] in control_text and _mentions(y, control_text):
+                g.add_edge(c, y)
+        for t in treatments:
+            if c_name[:8] in control_text and _mentions(t, control_text):
+                g.add_edge(c, t)
+
+
+def _mentions(node_label: str, text: str) -> bool:
+    """判断节点标签是否出现在文本中（简单子串匹配，作为稀疏连接依据）"""
+    token = node_label.lower()
+    return token[:8] in text.lower()
 
 
 # ═══════════════════════════════════════════════════════════
@@ -289,80 +313,19 @@ def validate_methodology(methods_text: str) -> dict:
     g = build_causal_graph(claims)
 
     issues = []
-    findings = {}
 
-    # 1. 检查后门路径
-    treatments = [n for n in g.nodes if n.startswith("T")]
-    outcomes = [n for n in g.nodes if n.startswith("Y")]
+    # 1. 后门路径未阻断
+    backdoor_issues = _check_backdoor(g)
+    issues.extend(backdoor_issues)
 
-    for t in treatments:
-        for y in outcomes:
-            if t == y:
-                continue
-            backdoors = g.backdoor_paths(t, y)
-            if backdoors:
-                adj_set = g.get_minimal_adjustment_set(t, y)
-                controls_in_graph = {n for n in g.nodes if n.startswith("C")}
-                missing_controls = adj_set - controls_in_graph
-                if missing_controls:
-                    issues.append(
-                        f"后门路径未阻断：{t}→{y} 存在混淆，"
-                        f"需额外控制 {missing_controls}"
-                    )
-
-    findings["backdoor_issues"] = len([i for i in issues if "后门" in i])
-
-    # 2. 检查样本量
-    sample_patterns = [
-        r'[Nn]\s*[=＝]\s*(\d+)',
-        r'(\d+)\s*(?:例|个|名|只|份)',
-        r'sample\s*size.*?(\d+)',
-    ]
-    sample_sizes = []
-    for pattern in sample_patterns:
-        matches = re.findall(pattern, methods_text)
-        sample_sizes.extend([int(m) for m in matches if int(m) > 1])
-
-    if sample_sizes:
-        n_total = max(sample_sizes)
-        n_vars = len(claims["treatments"]) + len(claims["controls"]) + 1
-        if n_vars > 1 and n_total / n_vars < 10:
-            issues.append(
-                f"样本量不足：{n_total} 个样本 vs {n_vars} 个变量，"
-                f"每变量不足10个观测"
-            )
-    else:
-        n_total = None
-
-    findings["sample_size"] = max(sample_sizes) if sample_sizes else None
+    # 2. 样本量不足
+    n_total = _check_sample_size(methods_text, claims, issues)
 
     # 3. 中介 vs 混淆混淆
-    mediator_terms = claims["mediators"]
-    if mediator_terms:
-        for med in mediator_terms[:3]:
-            # 检查中介变量是否可能是混淆变量
-            confound_keywords = ['年龄', '性别', '收入', '教育', '基线', 'baseline',
-                                'age', 'sex', 'gender', 'income', 'education']
-            for kw in confound_keywords:
-                if kw in med:
-                    issues.append(
-                        f"可能的混淆误作中介：'{med}' 含 '{kw}'，"
-                        f"可能是混淆变量而非中介变量"
-                    )
-                    break
+    _check_mediator_confound(claims, issues)
 
     # 4. 反向因果检测
-    reverse_causal_patterns = [
-        r'(?:相关|关联|correlation|association)',
-    ]
-    if any(re.search(p, methods_text) for p in reverse_causal_patterns):
-        if not any(re.search(p, methods_text) for p in [
-            r'(?:因果|causal|cause|效应|effect)',
-            r'(?:纵[向贯]|longitudinal|前瞻|prospective|干预|intervention)',
-        ]):
-            issues.append(
-                "仅报告相关/关联但声称因果，且无纵向设计或干预设计"
-            )
+    _check_reverse_causal(methods_text, issues)
 
     # 综合判定
     if len(issues) >= 3:
@@ -381,11 +344,88 @@ def validate_methodology(methods_text: str) -> dict:
         },
         "graph_nodes": len(g.nodes),
         "graph_edges": len(g.edges),
-        "sample_size": findings.get("sample_size"),
-        "backdoor_issues": findings.get("backdoor_issues", 0),
+        "sample_size": n_total,
+        "backdoor_issues": len(backdoor_issues),
         "issues": issues,
         "verdict": verdict,
     }
+
+
+def _check_backdoor(g) -> list:
+    """检测后门路径未被控制变量阻断的情况。"""
+    issues = []
+    treatments = [n for n in g.nodes if n.startswith("T")]
+    outcomes = [n for n in g.nodes if n.startswith("Y")]
+    controls_in_graph = {n for n in g.nodes if n.startswith("C")}
+
+    for t in treatments:
+        for y in outcomes:
+            if t == y:
+                continue
+            backdoors = g.backdoor_paths(t, y)
+            if backdoors:
+                adj_set = g.get_minimal_adjustment_set(t, y)
+                missing_controls = adj_set - controls_in_graph
+                if missing_controls:
+                    issues.append(
+                        f"后门路径未阻断：{t}→{y} 存在混淆，"
+                        f"需额外控制 {missing_controls}"
+                    )
+    return issues
+
+
+def _check_sample_size(methods_text: str, claims: dict, issues: list) -> int:
+    """检测样本量是否足以支撑因果分析，返回最大样本量（无则 None）。"""
+    sample_patterns = [
+        r'[Nn]\s*[=＝]\s*(\d+)',
+        r'(\d+)\s*(?:例|个|名|只|份)',
+        r'sample\s*size.*?(\d+)',
+    ]
+    sample_sizes = []
+    for pattern in sample_patterns:
+        matches = re.findall(pattern, methods_text)
+        sample_sizes.extend([int(m) for m in matches if int(m) > 1])
+
+    if not sample_sizes:
+        return None
+
+    n_total = max(sample_sizes)
+    n_vars = len(claims["treatments"]) + len(claims["controls"]) + 1
+    if n_vars > 1 and n_total / n_vars < 10:
+        issues.append(
+            f"样本量不足：{n_total} 个样本 vs {n_vars} 个变量，"
+            f"每变量不足10个观测"
+        )
+    return n_total
+
+
+def _check_mediator_confound(claims: dict, issues: list):
+    """检查中介变量是否可能是被误判的混淆变量。"""
+    confound_keywords = ['年龄', '性别', '收入', '教育', '基线', 'baseline',
+                        'age', 'sex', 'gender', 'income', 'education']
+    for med in claims["mediators"][:3]:
+        for kw in confound_keywords:
+            if kw in med:
+                issues.append(
+                    f"可能的混淆误作中介：'{med}' 含 '{kw}'，"
+                    f"可能是混淆变量而非中介变量"
+                )
+                break
+
+
+def _check_reverse_causal(methods_text: str, issues: list):
+    """检测仅报告相关却声称因果（无纵向/干预设计）的情况。"""
+    if not re.search(r'(?:相关|关联|correlation|association)', methods_text):
+        return
+    has_causal = re.search(
+        r'(?:因果|causal|cause|效应|effect)', methods_text)
+    has_design = re.search(
+        r'(?:纵[向贯]|longitudinal|前瞻|prospective|干预|intervention)',
+        methods_text)
+    if not (has_causal or has_design):
+        issues.append(
+            "仅报告相关/关联但声称因果，且无纵向设计或干预设计"
+        )
 
 
 # ═══════════════════════════════════════════════════════════

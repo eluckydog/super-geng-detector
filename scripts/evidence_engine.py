@@ -19,6 +19,23 @@ from collections import defaultdict
 # Module 1: Evidence Likelihood Model
 # ═══════════════════════════════════════════════════════════
 
+def _alarm_log_lr(key: str) -> float:
+    """根据证据 key 返回严重红旗的 log LR 权重。"""
+    # (关键词 -> log LR)，命中则返回，否则用默认权重
+    keyword_lr = [
+        (("PRNU", "copy_move"), 20),
+        (("GRIM",), 18),
+        (("SD", "hierarchical"), 16),
+        (("Benford",), 15),
+        (("HMM", "AI"), 12),
+        (("因果", "causal"), 8),
+    ]
+    for keywords, lr in keyword_lr:
+        if any(k in key for k in keywords):
+            return math.log(lr)
+    return math.log(10)  # 默认严重权重
+
+
 def evidence_to_likelihood(evidence_item: dict) -> float:
     """
     将单个证据项转化为似然比 P(evidence | fraud) / P(evidence | honest)。
@@ -29,20 +46,7 @@ def evidence_to_likelihood(evidence_item: dict) -> float:
     key = evidence_item.get("key", "")
 
     if "🚨" in verdict:
-        # 严重红旗
-        if "PRNU" in key or "copy_move" in key:
-            return math.log(20)  # 图像证据很强
-        if "Benford" in key:
-            return math.log(15)
-        if "HMM" in key or "AI" in key:
-            return math.log(12)
-        if "因果" in key or "causal" in key:
-            return math.log(8)
-        if "GRIM" in key:
-            return math.log(18)
-        if "SD" in key or "hierarchical" in key:
-            return math.log(16)
-        return math.log(10)  # 默认
+        return _alarm_log_lr(key)
 
     if "⚠️" in verdict:
         return math.log(3)  # 弱信号
@@ -257,34 +261,8 @@ def synthesize_evidence(stem_findings: List[Dict] = None,
     # 综合判定
     p = network_result["posterior_prob"]
     bf = network_result["bayes_factor"]
-
-    if p > 0.9:
-        level = "🔥🔥🔥 战斗力探测器爆表"
-        label = "极可能造假"
-    elif p > 0.7:
-        level = "🔥🔥 高度可疑"
-        label = "高度可疑"
-    elif p > 0.5:
-        level = "🔥 中度可疑"
-        label = "中度可疑"
-    elif p > 0.3:
-        level = "⚡ 低度可疑"
-        label = "低度可疑"
-    else:
-        level = "💨 战斗力只有5"
-        label = "无明显造假迹象"
-
-    BF_interpretation = ""
-    if bf > 100:
-        BF_interpretation = "极强证据（BF > 100）支持造假假设"
-    elif bf > 10:
-        BF_interpretation = "强证据（BF > 10）支持造假假设"
-    elif bf > 3:
-        BF_interpretation = "中等证据（BF > 3）支持造假假设"
-    elif bf > 1:
-        BF_interpretation = "弱证据（BF > 1）"
-    else:
-        BF_interpretation = "证据不支持造假假设（BF < 1）"
+    level, label = _fraud_level(p)
+    BF_interpretation = _bf_interpretation(bf)
 
     return {
         "posterior_fraud_probability": float(p),
@@ -297,3 +275,29 @@ def synthesize_evidence(stem_findings: List[Dict] = None,
         "shapley_decomposition": shapley["shapley_values"],
         "n_total_evidence": len(all_evidence),
     }
+
+
+def _fraud_level(p: float):
+    """根据后验造假概率返回等级与标签。"""
+    if p > 0.9:
+        return "🔥🔥🔥 战斗力探测器爆表", "极可能造假"
+    if p > 0.7:
+        return "🔥🔥 高度可疑", "高度可疑"
+    if p > 0.5:
+        return "🔥 中度可疑", "中度可疑"
+    if p > 0.3:
+        return "⚡ 低度可疑", "低度可疑"
+    return "💨 战斗力只有5", "无明显造假迹象"
+
+
+def _bf_interpretation(bf: float) -> str:
+    """根据贝叶斯因子返回解释文本。"""
+    if bf > 100:
+        return "极强证据（BF > 100）支持造假假设"
+    if bf > 10:
+        return "强证据（BF > 10）支持造假假设"
+    if bf > 3:
+        return "中等证据（BF > 3）支持造假假设"
+    if bf > 1:
+        return "弱证据（BF > 1）"
+    return "证据不支持造假假设（BF < 1）"
