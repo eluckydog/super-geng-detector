@@ -63,40 +63,40 @@ def hierarchical_sd_model(groups: List[Tuple[float, float, int]],
         return {"error": "至少需要2组数据"}
 
     # 准备数据
-    all_y = []
-    group_idx = []
-    group_means = []
-    for i, (mean, sd, n) in enumerate(groups):
-        # 从声称的 mean±SD 模拟原始数据
-        np.random.seed(42 + i)
-        sim_data = np.random.normal(mean, sd, max(n, 2))
-        all_y.extend(sim_data)
-        group_idx.extend([i] * len(sim_data))
-        group_means.append(mean)
-
-    all_y = jnp.array(all_y)
-    group_idx = jnp.array(group_idx, dtype=jnp.int32)
+    # 关键修复：不再从"声称的 mean±SD"模拟原始数据再回灌给观测
+    # （那等于先假设声称 SD 为真再用它自证，构成循环论证）。
+    # 改为：以各组"声称的 SD"本身作为观测值，用分层贝叶斯模型推断
+    # 这些 SD 是否来自同一共同分布——这才是检验"多组独立实验 SD
+    # 完全相同是否可能"的正确思路。
+    group_sds = jnp.array([float(sd) for (_, sd, _) in groups])
+    group_means = [float(mean) for (mean, _, _) in groups]
     n_groups = len(groups)
+
+    # 仅当 obs 需要均值代理时保留，但本模型观测对象为 SD
+    all_y = group_sds
+    group_idx = jnp.arange(n_groups)
 
     def model():
         # 总体 SD 分布的超参数
         mu_sigma = numpyro.sample("mu_sigma", dist.Normal(0, 5))
         tau_sigma = numpyro.sample("tau_sigma", dist.HalfNormal(2))
 
-        # 各组真实均值
+        # 各组 SD 的共同对数均值（超先验）；sigma_g 为各组 SD 观测噪声
+        # 关键：obs 是各组"声称的 SD"，模型检验这些 SD 是否来自同一分布
+        log_sds = jnp.log(jnp.clip(group_sds, 1e-6, None))
         with numpyro.plate("groups", n_groups):
-            mu_g = numpyro.sample("mu_g", dist.Normal(jnp.array(group_means), 5))
+            mu_g = numpyro.sample("mu_g", dist.Normal(log_sds, 1.0))
             sigma_g = numpyro.sample(
                 "sigma_g",
                 dist.LogNormal(mu_sigma, tau_sigma)
             )
 
-        # 观测
+        # 观测：各组 SD 应围绕其对数均值 mu_g 波动
         with numpyro.plate("data", len(all_y)):
             numpyro.sample(
                 "obs",
                 dist.Normal(mu_g[group_idx], sigma_g[group_idx]),
-                obs=all_y,
+                obs=log_sds[group_idx],
             )
 
     # MCMC 采样

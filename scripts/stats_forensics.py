@@ -16,11 +16,47 @@ from typing import List, Tuple, Optional, Dict, Any
 import numpy as np
 from scipy import stats as sp_stats
 from scipy.stats import kstest
+from scipy.stats import binomtest
 
 
 # ═══════════════════════════════════════════════════════════
 # Module 1: Benford Suite (Full-digit + KS + AD)
 # ═══════════════════════════════════════════════════════════
+
+def _benford_expected_probs(pos: int) -> np.ndarray:
+    """计算第 pos 位(1-based)数字的 Benford 期望概率向量。
+
+    第一位数字仅取值 1-9（长度 9）；其余位取值 0-9（长度 10）。
+    """
+    if pos == 1:
+        return np.array([math.log10(1 + 1/d) for d in range(1, 10)])
+    if pos == 2:
+        # 第二位数字 d(0-9) 的 Benford 期望概率：
+        # sum_{k=1..9} log10(1 + 1/(10*k + d))
+        return np.array([
+            sum(math.log10(1 + 1/(10*k + d)) for k in range(1, 10))
+            for d in range(10)
+        ])
+    # 第 3 位及以后：Benford 定律对第 n 位的闭式解
+    # P(d) = sum_{k=10^{m-1}..10^{m}-1} log10(1 + 1/(10*k + d)), m=pos-1
+    m = pos - 1
+    lo, hi = 10 ** (m - 1), 10 ** m
+    return np.array([
+        sum(math.log10(1 + 1/(10*k + d)) for k in range(lo, hi))
+        for d in range(10)
+    ])
+
+
+def _benford_conformity(mad: float):
+    """根据 MAD 值判定 Benford 符合度等级。"""
+    if mad < 0.006:
+        return "高度符合", "normal"
+    if mad < 0.015:
+        return "大致符合", "mild"
+    if mad < 0.03:
+        return "边缘异常", "suspicious"
+    return "显著偏离", "high"
+
 
 def benford_full(data: List[float], max_digit: int = 4) -> dict:
     """
@@ -39,18 +75,9 @@ def benford_full(data: List[float], max_digit: int = 4) -> dict:
             results[f"digit_{pos}"] = {"error": f"样本量不足 ({len(digits)})"}
             continue
 
-        if pos == 1:
-            expected_probs = np.array([math.log10(1 + 1/d) for d in range(1, 10)])
-            observed = np.bincount(digits, minlength=10)[1:10]
-        elif pos == 2:
-            expected_probs = np.array([
-                sum(math.log10(1 + 1/(10*k + d)) for k in range(1, 10))
-                for d in range(10)
-            ])
-            observed = np.bincount(digits, minlength=10)[0:10]
-        else:
-            expected_probs = np.full(10, 0.1)
-            observed = np.bincount(digits, minlength=10)[0:10]
+        expected_probs = _benford_expected_probs(pos)
+        observed = np.bincount(digits, minlength=10)[0:10] if pos > 1 \
+            else np.bincount(digits, minlength=10)[1:10]
 
         expected = expected_probs * len(digits)
         chi2, chi2_p = sp_stats.chisquare(f_obs=observed, f_exp=expected)
@@ -64,25 +91,9 @@ def benford_full(data: List[float], max_digit: int = 4) -> dict:
         ks_stat, ks_p = kstest(obs_prop, lambda x: _benford_cdf(x, pos))
 
         # Anderson-Darling (on observed digit frequencies vs expected)
-        # Use empirical CDF comparison
-        obs_sorted = np.sort(digits)
-        n = len(digits)
         ad_stat = _anderson_darling_stat(digits, pos)
 
-        # 综合判定
-        if mad < 0.006:
-            conformity = "高度符合"
-            severity = "normal"
-        elif mad < 0.015:
-            conformity = "大致符合"
-            severity = "mild"
-        elif mad < 0.03:
-            conformity = "边缘异常"
-            severity = "suspicious"
-        else:
-            conformity = "显著偏离"
-            severity = "high"
-
+        conformity, severity = _benford_conformity(mad)
         if severity != "normal":
             all_warnings.append(
                 f"第{pos}位数字 {conformity}（MAD={mad:.4f}, χ²={chi2:.1f}, p={chi2_p:.4f}）"
@@ -179,6 +190,59 @@ def _anderson_darling_stat(digits: List[int], position: int) -> float:
 # Module 2: Extended GRIM
 # ═══════════════════════════════════════════════════════════
 
+def _grim_precision_digits(mean: float) -> int:
+    """从均值字符串推断报告精度（小数位数）。"""
+    mean_str = f"{mean}"
+    if '.' in mean_str:
+        return len(mean_str.split('.')[1])
+    return 0
+
+
+def _grim_mean_consistency(mean: float, n: int, granularity: float) -> bool:
+    """检查均值是否与 n 个整数测量值的粒度兼容。"""
+    if abs(mean - round(mean / granularity) * granularity) < 1e-10:
+        return True
+    center = round(mean * n / granularity)
+    for s in range(max(0, center - 3), center + 4):
+        if abs(mean - s * granularity / n) < 1e-10:
+            return True
+    return False
+
+
+def _grim_sd_consistency(sd: float, n: int, granularity: float) -> bool:
+    """检查 SD 是否与 n 个整数测量值的粒度兼容。
+
+    对于 n 个精度为 granularity 的整数测量值，其偏差平方和必为
+    granularity^2 的整数倍；即 n*SD^2 的粒度归一化结果应接近整数。
+    """
+    if n <= 1 or granularity <= 0:
+        return True
+    ss_norm = (sd ** 2) * n / (granularity ** 2)
+    return abs(ss_norm - round(ss_norm)) <= 1e-6
+
+
+def _grim_exhaustive_enum(mean: float, sd: float, n: int,
+                          granularity: float,
+                          min_sum: int, max_sum: int):
+    """小样本（n≤6）全枚举：是否存在 n 个整数产生声称的 mean±SD。
+
+    返回 True/False（能/不能），样本过大无法枚举时返回 None。
+    """
+    if not (n <= 6 and min_sum <= max_sum and (max_sum - min_sum) < 10000):
+        return None
+    for total in range(min_sum, max_sum + 1):
+        if abs(total * granularity / n - mean) > 1e-10:
+            continue
+        for combo in itertools.combinations_with_replacement(range(0, 101), n):
+            vals = np.array(combo, dtype=float) * granularity
+            if abs(np.mean(vals) - mean) >= 1e-10:
+                continue
+            sd_val = np.std(vals, ddof=1) if n > 1 else 0
+            if abs(sd_val - sd) < 1e-8:
+                return True
+    return False
+
+
 def grim_extended(mean: float, sd: float, n: int, precision_digits: int = None) -> dict:
     """
     扩展 GRIM（Granularity-Related Inconsistency of Means）检验。
@@ -193,59 +257,16 @@ def grim_extended(mean: float, sd: float, n: int, precision_digits: int = None) 
     if n <= 0 or sd < 0:
         return {"error": "无效参数"}
 
-    # 自动检测报告精度
     if precision_digits is None:
-        mean_str = f"{mean}"
-        if '.' in mean_str:
-            precision_digits = len(mean_str.split('.')[1])
-        else:
-            precision_digits = 0
+        precision_digits = _grim_precision_digits(mean)
 
     granularity = 10 ** (-precision_digits)
     min_sum = int(np.ceil(n * (mean - 3 * sd / np.sqrt(n))))
     max_sum = int(np.floor(n * (mean + 3 * sd / np.sqrt(n))))
 
-    # 检查 1：均值粒度
-    mean_consistent = abs(mean - round(mean / granularity) * granularity) < 1e-10
-    if not mean_consistent:
-        # 检查是否与 n 个整数的均值粒度一致
-        mean_check = False
-        for s in range(max(0, round(mean * n / granularity) - 3),
-                       round(mean * n / granularity) + 4):
-            if abs(mean - s * granularity / n) < 1e-10:
-                mean_check = True
-                break
-        mean_consistent = mean_check
-
-    # 检查 2：SD 粒度
-    sd_consistent = True
-    if n > 1:
-        target_ss = sd ** 2 * n  # sum of squared deviations
-        if granularity > 0:
-            ss_unit = granularity ** 2  # 最小平方差单位
-            if abs(target_ss / ss_unit - round(target_ss / ss_unit)) > 1e-6:
-                sd_consistent = False
-
-    # 检查 3：小样本全枚举
-    if n <= 6 and min_sum <= max_sum and (max_sum - min_sum) < 10000:
-        possible = False
-        for total in range(min_sum, max_sum + 1):
-            mean_val = total * granularity / n
-            if abs(mean_val - mean) > 1e-10:
-                continue
-            # 检查是否存在 n 个整数产生给定的 SD
-            for combo in itertools.combinations_with_replacement(
-                range(0, 101), n):
-                vals = np.array(combo, dtype=float) * granularity
-                if abs(np.mean(vals) - mean) < 1e-10:
-                    sd_val = np.std(vals, ddof=1) if n > 1 else 0
-                    if abs(sd_val - sd) < 1e-8:
-                        possible = True
-                        break
-            if possible:
-                break
-    else:
-        possible = None  # 样本太大无法枚举
+    mean_consistent = _grim_mean_consistency(mean, n, granularity)
+    sd_consistent = _grim_sd_consistency(sd, n, granularity)
+    possible = _grim_exhaustive_enum(mean, sd, n, granularity, min_sum, max_sum)
 
     # 综合判定
     issues = []
@@ -456,31 +477,11 @@ def last_digit_advanced(data: List[float]) -> dict:
     odd_binom_p = binomtest(odd_count, n, p=0.5, alternative='two-sided').pvalue
 
     # 3. 相邻位相关性（检查相邻两个末位数字是否独立）
-    if n >= 2:
-        pairs = list(zip(last_digits[:-1], last_digits[1:]))
-        same = sum(1 for a, b in pairs if a == b)
-        expected_same = n / 10  # 均匀分布下，相邻两数相同的概率 1/10
-        pair_deviation = (same - expected_same) / np.sqrt(expected_same * 0.9)
-    else:
-        same = 0
-        expected_same = 0
-        pair_deviation = 0
+    pair_deviation = _adjacent_last_digit_deviation(last_digits, n)
 
     # 综合判定
-    issues = []
-    if chi2_p < 0.01:
-        issues.append(f"末位分布严重不均匀（χ²={chi2:.1f}, p={chi2_p:.4f}）")
-    elif chi2_p < 0.05:
-        issues.append(f"末位分布不太均匀（χ²={chi2:.1f}, p={chi2_p:.4f}）")
-
-    if odd_binom_p < 0.01:
-        issues.append(f"奇偶比严重失衡（{odd_count}/{n}={odd_ratio:.2f}, p={odd_binom_p:.4f}）")
-    elif odd_binom_p < 0.05:
-        issues.append(f"奇偶比轻微失衡（{odd_count}/{n}={odd_ratio:.2f}, p={odd_binom_p:.4f}）")
-
-    if abs(pair_deviation) > 3:
-        issues.append(f"相邻末位高度相关（偏差={pair_deviation:.1f}σ），不符合独立均匀分布")
-
+    issues = _last_digit_issues(chi2, chi2_p, odd_count, n, odd_ratio,
+                                odd_binom_p, pair_deviation)
     if len(issues) >= 2:
         verdict = f"🚨 末位数字多重异常：" + "；".join(issues)
     elif len(issues) == 1:
@@ -499,6 +500,35 @@ def last_digit_advanced(data: List[float]) -> dict:
         "issues": issues,
         "verdict": verdict,
     }
+
+
+def _adjacent_last_digit_deviation(last_digits: List[int], n: int) -> float:
+    """计算相邻末位数字相关性偏差（z 值）。"""
+    if n < 2:
+        return 0.0
+    pairs = list(zip(last_digits[:-1], last_digits[1:]))
+    same = sum(1 for a, b in pairs if a == b)
+    expected_same = n / 10  # 均匀分布下，相邻两数相同的概率 1/10
+    return float((same - expected_same) / np.sqrt(expected_same * 0.9))
+
+
+def _last_digit_issues(chi2, chi2_p, odd_count, n, odd_ratio,
+                       odd_binom_p, pair_deviation):
+    """根据末位各项统计量生成问题列表。"""
+    issues = []
+    if chi2_p < 0.01:
+        issues.append(f"末位分布严重不均匀（χ²={chi2:.1f}, p={chi2_p:.4f}）")
+    elif chi2_p < 0.05:
+        issues.append(f"末位分布不太均匀（χ²={chi2:.1f}, p={chi2_p:.4f}）")
+
+    if odd_binom_p < 0.01:
+        issues.append(f"奇偶比严重失衡（{odd_count}/{n}={odd_ratio:.2f}, p={odd_binom_p:.4f}）")
+    elif odd_binom_p < 0.05:
+        issues.append(f"奇偶比轻微失衡（{odd_count}/{n}={odd_ratio:.2f}, p={odd_binom_p:.4f}）")
+
+    if abs(pair_deviation) > 3:
+        issues.append(f"相邻末位高度相关（偏差={pair_deviation:.1f}σ），不符合独立均匀分布")
+    return issues
 
 
 # ═══════════════════════════════════════════════════════════
@@ -540,28 +570,14 @@ def sd_pattern_detect(sd_values: List[float],
     same_decimals = len(set(decimal_counts)) == 1 if decimal_counts else False
 
     # 4. 聚类
-    from scipy.cluster.hierarchy import fcluster, linkage
-    if n >= 3:
-        Z = linkage(np.array(sds).reshape(-1, 1), method='single')
-        clusters = fcluster(Z, t=0.01 * np.std(sds) if np.std(sds) > 0 else 0.01,
-                           criterion='distance')
-        n_clusters = len(set(clusters))
-    else:
-        n_clusters = unique_sds
+    n_clusters = _sd_cluster_count(sds, n, unique_sds)
 
     # 5. 变异系数
     sd_cv = float(np.std(sds) / np.mean(sds)) if np.mean(sds) > 0 else 0
 
     # 判定
-    issues = []
-    if all_same:
-        issues.append("🚨 所有组 SD 完全相同（数据极可能编造）")
-    if integer_ratio > 0.8:
-        issues.append(f"⚠️ {integer_sds}/{n} 组 SD 为整数（异常整齐）")
-    if same_decimals and len(set(sds)) > 1:
-        issues.append("⚠️ SD 小数位数完全一致")
-    if n_clusters <= n * 0.4 and n >= 4:
-        issues.append(f"⚠️ SD 严重聚类（共{n_clusters}个不同值，{n}组数据）")
+    issues = _sd_pattern_issues(all_same, integer_sds, n, integer_ratio,
+                                same_decimals, sds, n_clusters)
 
     if len(issues) >= 2:
         verdict = "🚨 SD 模式多重异常：" + "；".join(issues)
@@ -583,22 +599,41 @@ def sd_pattern_detect(sd_values: List[float],
     }
 
 
+def _sd_cluster_count(sds: List[float], n: int, unique_sds: int) -> int:
+    """对 SD 值做层次聚类，返回聚类数（样本不足时退化为唯一值数）。"""
+    from scipy.cluster.hierarchy import fcluster, linkage
+    if n < 3:
+        return unique_sds
+    Z = linkage(np.array(sds).reshape(-1, 1), method='single')
+    threshold = 0.01 * np.std(sds) if np.std(sds) > 0 else 0.01
+    clusters = fcluster(Z, t=threshold, criterion='distance')
+    return len(set(clusters))
+
+
+def _sd_pattern_issues(all_same, integer_sds, n, integer_ratio,
+                       same_decimals, sds, n_clusters):
+    """根据 SD 模式统计量生成问题列表。"""
+    issues = []
+    if all_same:
+        issues.append("🚨 所有组 SD 完全相同（数据极可能编造）")
+    if integer_ratio > 0.8:
+        issues.append(f"⚠️ {integer_sds}/{n} 组 SD 为整数（异常整齐）")
+    if same_decimals and len(set(sds)) > 1:
+        issues.append("⚠️ SD 小数位数完全一致")
+    if n_clusters <= n * 0.4 and n >= 4:
+        issues.append(f"⚠️ SD 严重聚类（共{n_clusters}个不同值，{n}组数据）")
+    return issues
+
+
 # ═══════════════════════════════════════════════════════════
 # Module 7: Full Table Arsenal
 # ═══════════════════════════════════════════════════════════
 
-def full_stats_arsenal(data_table: List[Dict[str, Any]]) -> dict:
-    """
-    对论文数据表运行全套数值法医检测。
-    """
-    all_values = []
-    all_means = []
-    all_sds = []
-    all_ns = []
-    columns = []
-
+def _collect_table_values(data_table):
+    """从数据表中收集全部数值/均值/SD/N，供各项检测使用。"""
+    all_values, all_means, all_sds, all_ns = [], [], [], []
     for row in data_table:
-        if "values" in row and row["values"]:
+        if row.get("values"):
             all_values.extend(row["values"])
         if "mean" in row:
             all_means.append(row["mean"])
@@ -606,22 +641,47 @@ def full_stats_arsenal(data_table: List[Dict[str, Any]]) -> dict:
             all_sds.append(row["sd"])
         if "n" in row:
             all_ns.append(row["n"])
+    return all_values, all_means, all_sds, all_ns
 
+
+def _summarize_alarms(results: dict):
+    """汇总各检测结果中的 🚨 警报，构造 alarm_count / alarms / overall。"""
+    alarms = []
+    for key, val in results.items():
+        if isinstance(val, dict) and "🚨" in str(val.get("verdict", "")):
+            alarms.append(f"[{key}] {val['verdict']}")
+        elif isinstance(val, list):
+            for item in val:
+                if isinstance(item, dict) and "🚨" in str(item.get("verdict", "")):
+                    alarms.append(f"[{key}] {item['verdict']}")
+    results["alarm_count"] = len(alarms)
+    results["alarms"] = alarms
+    results["overall"] = (
+        f"🔥 数值法医完成：{len(alarms)} 个警报"
+        if alarms
+        else "✅ 数值法医未发现明显异常"
+    )
+    return results
+
+
+def full_stats_arsenal(data_table: List[Dict[str, Any]]) -> dict:
+    """
+    对论文数据表运行全套数值法医检测。
+    """
+    all_values, all_means, all_sds, all_ns = _collect_table_values(data_table)
     results = {}
 
-    # Benford
+    # Benford / 末位（需足够样本量）
     if len(all_values) >= 30:
         results["benford"] = benford_full(all_values)
-
-    # 末位
-    if len(all_values) >= 30:
         results["last_digit"] = last_digit_advanced(all_values)
 
     # GRIM
-    grim_results = []
-    for i, row in enumerate(data_table):
-        if all(k in row for k in ["mean", "sd", "n"]) and row["n"] is not None:
-            grim_results.append(grim_extended(row["mean"], row["sd"], row["n"]))
+    grim_results = [
+        grim_extended(r["mean"], r["sd"], r["n"])
+        for r in data_table
+        if all(k in r for k in ["mean", "sd", "n"]) and r["n"] is not None
+    ]
     if grim_results:
         results["grim"] = grim_results
 
@@ -630,26 +690,8 @@ def full_stats_arsenal(data_table: List[Dict[str, Any]]) -> dict:
         results["sd_pattern"] = sd_pattern_detect(all_sds)
 
     # 列差值
-    if "columns" in data_table[0] if data_table else False:
+    if data_table and "columns" in data_table[0]:
         cols = [row["columns"] for row in data_table]
         results["column_diff"] = column_diff_changepoint(cols)
 
-    # 汇总
-    alarms = []
-    for key, val in results.items():
-        if isinstance(val, dict) and "verdict" in val and "🚨" in str(val.get("verdict", "")):
-            alarms.append(f"[{key}] {val['verdict']}")
-        elif isinstance(val, list):
-            for item in val:
-                if isinstance(item, dict) and "🚨" in str(item.get("verdict", "")):
-                    alarms.append(f"[{key}] {item['verdict']}")
-
-    results["alarm_count"] = len(alarms)
-    results["alarms"] = alarms
-    results["overall"] = (
-        f"🔥 数值法医完成：{len(alarms)} 个警报"
-        if alarms
-        else "✅ 数值法医未发现明显异常"
-    )
-
-    return results
+    return _summarize_alarms(results)
